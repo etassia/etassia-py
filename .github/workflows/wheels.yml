@@ -175,25 +175,44 @@ jobs:
       - name: Vendor, build, retag, and prove inside the container
         id: emulated
         continue-on-error: ${{ matrix.allow_fail == true }}
+        # the emulated container's networking and its writes to the
+        # bind mount fail nondeterministically on the runners (DNS
+        # error 6 on i686, write error 23 on s390x/ppc64le, run to
+        # run), so a failed attempt restarts the whole container:
+        # fresh bridge, fresh resolver. --dns bypasses the host's
+        # embedded resolver, which is where the breakage lives.
         run: |
-          docker run --rm --platform "${{ matrix.arch }}" \
-            -v "$GITHUB_WORKSPACE":/io -w /io \
-            "${{ matrix.image }}" \
-            bash -c '
-              set -e
-              # the manylinux images keep their python under
-              # /opt/python/cp39-cp39/bin, off PATH
-              export PATH=/opt/python/cp39-cp39/bin:$PATH
-              export ETASSIA_MUSL=${{ matrix.musl == true && '1' || '0' }}
-              bash scripts/vendor_engine.sh
-              pip install -U pip wheel pytest
-              pip wheel . --no-deps -w dist
-              python3 -m wheel tags --remove --python-tag py3 --abi-tag none \
-                --platform-tag "${{ matrix.platform_tag }}" dist/*.whl
-              pip install dist/*.whl
-              ETASSIA_CORPUS_DIR=/io/etassia-rs/golden \
-                python3 -m pytest tests -q
-            '
+          for attempt in 1 2 3; do
+            echo "::group::container attempt $attempt"
+            if docker run --rm --platform "${{ matrix.arch }}" \
+              --dns 8.8.8.8 --dns 1.1.1.1 \
+              -v "$GITHUB_WORKSPACE":/io -w /io \
+              "${{ matrix.image }}" \
+              bash -c '
+                set -e
+                # the manylinux images keep their python under
+                # /opt/python/cp39-cp39/bin, off PATH
+                export PATH=/opt/python/cp39-cp39/bin:$PATH
+                export ETASSIA_MUSL=${{ matrix.musl == true && '1' || '0' }}
+                rm -rf tmp
+                bash scripts/vendor_engine.sh
+                pip install -U pip wheel pytest
+                pip wheel . --no-deps -w dist
+                python3 -m wheel tags --remove --python-tag py3 --abi-tag none \
+                  --platform-tag "${{ matrix.platform_tag }}" dist/*.whl
+                pip install dist/*.whl
+                ETASSIA_CORPUS_DIR=/io/etassia-rs/golden \
+                  python3 -m pytest tests -q
+              '
+            then
+              echo "::endgroup::"
+              exit 0
+            fi
+            echo "::endgroup::"
+            echo "container attempt $attempt failed; restarting"
+            sleep 15
+          done
+          exit 1
       - name: Note the allowed-fail leg
         if: steps.emulated.outcome == 'failure'
         run: |
