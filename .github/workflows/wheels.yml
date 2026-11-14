@@ -135,7 +135,6 @@ jobs:
   # container.
   build-emulated:
     runs-on: ubuntu-latest
-    continue-on-error: ${{ matrix.allow_fail == true }}
     strategy:
       fail-fast: false
       matrix:
@@ -174,6 +173,8 @@ jobs:
         with:
           platforms: all
       - name: Vendor, build, retag, and prove inside the container
+        id: emulated
+        continue-on-error: ${{ matrix.allow_fail == true }}
         run: |
           docker run --rm --platform "${{ matrix.arch }}" \
             -v "$GITHUB_WORKSPACE":/io -w /io \
@@ -193,7 +194,12 @@ jobs:
               ETASSIA_CORPUS_DIR=/io/etassia-rs/golden \
                 python3 -m pytest tests -q
             '
+      - name: Note the allowed-fail leg
+        if: steps.emulated.outcome == 'failure'
+        run: |
+          echo "::warning::${{ matrix.dist }} failed; the leg is marked allow_fail and does not gate the run"
       - uses: actions/upload-artifact@v4
         with:
           name: wheels-${{ matrix.dist }}
           path: dist/*.whl
+        if: steps.emulated.outcome == 'success'
