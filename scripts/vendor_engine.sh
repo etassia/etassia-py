@@ -18,6 +18,23 @@
 set -eu
 cd "$(dirname "$0")/.."
 
+# DNS under QEMU emulation flakes (curl error 6, which is outside the
+# default --retry set, while --retry-all-errors needs curl 7.71+ and
+# the manylinux_2_28 images ship 7.61) - so the retry loop lives in
+# the shell, and the body lands in a file before any pipe consumes it.
+fetch_to() {
+  url="${1:?}" out="${2:?}" attempt=1
+  while :; do
+    if curl --proto '=https' --retry 5 --connect-timeout 30 -sSL \
+      -o "$out" "$url"; then
+      return 0
+    fi
+    [ "$attempt" -ge 5 ] && return 1
+    attempt=$((attempt + 1))
+    sleep 5
+  done
+}
+
 echo "vendor_engine: uname -m=$(uname -m)"
 case "$(uname -m)" in
   armv7l | armv8l)
@@ -32,10 +49,8 @@ case "$(uname -m)" in
     ;;
   *)
     if ! command -v cargo >/dev/null 2>&1; then
-      # --retry-all-errors needs curl 7.71+; the manylinux_2_28 images
-      # ship 7.61 (Alma 8) and reject the flag outright
-      curl --proto '=https' --tlsv1.2 --retry 5 --connect-timeout 30 \
-        -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal
+      fetch_to https://sh.rustup.rs tmp/rustup-init.sh
+      sh tmp/rustup-init.sh -y --profile minimal
       export PATH="$HOME/.cargo/bin:/usr/bin:$PATH"
     fi
     ;;
@@ -43,9 +58,9 @@ esac
 
 commit="$(cat src/etassia/etassia-rs-version.txt)"
 mkdir -p tmp/engine
-curl --proto '=https' --retry 5 --connect-timeout 30 -sL \
-  "https://codeload.github.com/etassia/etassia-rs/tar.gz/${commit}" \
-  | tar xz --strip-components=1 -C tmp/engine
+fetch_to "https://codeload.github.com/etassia/etassia-rs/tar.gz/${commit}" \
+  tmp/engine.tar.gz
+tar xz --strip-components=1 -C tmp/engine < tmp/engine.tar.gz
 
 mkdir -p src/etassia/lib
 
