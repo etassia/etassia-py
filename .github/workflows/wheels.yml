@@ -1,0 +1,199 @@
+name: Wheels
+
+# Builds release wheels for the supported platforms and uploads them as
+# workflow artifacts. PUBLISHING to PyPI is a separate, owner-gated step
+# (release.yml, trusted publishing).
+#
+# The package is pure Python with a VENDORED cdylib, so setuptools tags
+# the wheel `py3-none-any` — wrong per platform. Every wheel is retagged
+# with its real platform before the smoke suite or upload.
+#
+# The platform matrix follows leptris/leptris-py#346's shape: native
+# runners where they exist, QEMU-emulated containers for the cross-arch
+# Linux legs (the emulated host IS the target — `vendor_engine.sh`
+# installs the emulated rustup and cargo builds natively for it), and
+# the full golden-parity suite runs on every wheel platform.
+# cibuildwheel was evaluated and rejected: it refuses pure wheels by
+# design, and this package's wheel doctrine (vendored binary, then
+# retag) is its own — the emulated legs drive the pinned pypa
+# containers directly.
+
+on:
+  workflow_dispatch:
+  workflow_call:
+  pull_request:
+    paths:
+      - 'pyproject.toml'
+      - 'src/**'
+      - 'scripts/**'
+      - '.github/workflows/wheels.yml'
+
+permissions:
+  contents: read
+
+env:
+  ENGINE_COMMIT_FILE: src/etassia/etassia-rs-version.txt
+
+jobs:
+  # -- native runners ----------------------------------------------------
+  # cargo builds on the runner (cross for the Windows legs via
+  # ETASSIA_RUST_TARGET; universal2 lipo on macOS; musl on the arm
+  # runner with musl-tools)
+  build-native:
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-22.04
+            lib: libetassia_ffi.so
+            platform_tag: manylinux_2_35_x86_64
+            dist: manylinux-x86_64
+          - os: ubuntu-24.04-arm
+            lib: libetassia_ffi.so
+            platform_tag: manylinux_2_35_aarch64
+            dist: manylinux-aarch64
+          - os: ubuntu-24.04-arm
+            lib: libetassia_ffi.so
+            platform_tag: musllinux_1_2_aarch64
+            dist: musllinux-aarch64
+            musl: true
+          - os: macos-15
+            lib: libetassia_ffi.dylib
+            platform_tag: macosx_11_0_universal2
+            dist: macos-universal
+            universal: true
+          - os: windows-2022
+            lib: etassia_ffi.dll
+            platform_tag: win_amd64
+            dist: win-amd64
+          - os: windows-11-arm
+            lib: etassia_ffi.dll
+            platform_tag: win_arm64
+            dist: win-arm64
+          - os: windows-2022
+            lib: etassia_ffi.dll
+            platform_tag: win32
+            dist: win-x86
+            rust_target: i686-pc-windows-msvc
+            python_arch: x86
+    env:
+      ETASSIA_RUST_TARGET: ${{ matrix.rust_target }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          architecture: ${{ matrix.python_arch }}
+      - name: musl toolchain (the aarch64 musl leg)
+        if: matrix.musl
+        run: sudo apt-get update && sudo apt-get install -y musl-tools
+      - name: Vendor the engine
+        shell: bash
+        run: bash scripts/vendor_engine.sh
+        env:
+          ETASSIA_MUSL: ${{ matrix.musl }}
+      - name: Build the wheel
+        run: |
+          python3 -m pip install -U pip wheel
+          python3 -m pip wheel . --no-deps -w dist
+      - name: Tag the wheel with its platform
+        shell: bash
+        run: |
+          python3 -m wheel tags --remove --python-tag py3 --abi-tag none \
+            --platform-tag "${{ matrix.platform_tag }}" dist/*.whl
+      - name: Smoke the wheel (the full suite)
+        shell: bash
+        # the musl wheel installs on musl python only — smoke it in an
+        # alpine arm64 container
+        run: |
+          if [ "${{ matrix.musl }}" = "true" ]; then
+            docker run --rm --platform linux/arm64 \
+              -v "$GITHUB_WORKSPACE":/io -w /io alpine:3.20 \
+              sh -c 'apk add -q python3 py3-pip py3-pytest && \
+                PIP_BREAK_SYSTEM_PACKAGES=1 pip3 install -q dist/*.whl && \
+                ETASSIA_CORPUS_DIR=/io/etassia-rs/golden \
+                python3 -m pytest tests -q'
+          else
+            python3 -m pip install dist/*.whl pytest
+            ETASSIA_CORPUS_DIR="$GITHUB_WORKSPACE/etassia-rs/golden" \
+              python3 -m pytest tests -q
+          fi
+      - uses: actions/upload-artifact@v4
+        with:
+          name: wheels-${{ matrix.dist }}
+          path: dist/*.whl
+
+  # -- QEMU-emulated Linux legs ------------------------------------------
+  # each leg drives the pinned manylinux/musllinux container for its
+  # arch directly: vendor_engine.sh installs the emulated rustup and
+  # cargo builds natively for the emulated host, then the wheel builds,
+  # retags, installs, and replays the full suite — all inside the
+  # container.
+  build-emulated:
+    runs-on: ubuntu-latest
+    continue-on-error: ${{ matrix.allow_fail == true }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: linux/386
+            image: quay.io/pypa/manylinux_2_28_i686:2026.11.07-1
+            platform_tag: manylinux_2_28_i686
+            dist: manylinux-i686
+          - arch: linux/arm/v7
+            image: quay.io/pypa/musllinux_1_2_armv7l:2026.11.07-1
+            platform_tag: musllinux_1_2_armv7l
+            dist: musllinux-armv7l
+            allow_fail: true # green-watch first
+          - arch: linux/ppc64le
+            image: quay.io/pypa/manylinux_2_28_ppc64le:2026.11.07-1
+            platform_tag: manylinux_2_28_ppc64le
+            dist: manylinux-ppc64le
+          - arch: linux/s390x
+            image: quay.io/pypa/manylinux_2_28_s390x:2026.11.07-1
+            platform_tag: manylinux_2_28_s390x
+            dist: manylinux-s390x
+          - arch: linux/riscv64
+            # the glibc riscv64 images left quay entirely (every date,
+            # including latest, 404s) - the tier ships musl-only today
+            image: quay.io/pypa/musllinux_1_2_riscv64:latest
+            platform_tag: musllinux_1_2_riscv64
+            dist: musllinux-riscv64
+            musl: true
+            allow_fail: true # rustc under qemu-riscv64: runtime unobserved
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
+        with:
+          platforms: all
+      - name: Vendor, build, retag, and prove inside the container
+        run: |
+          docker run --rm --platform "${{ matrix.arch }}" \
+            -v "$GITHUB_WORKSPACE":/io -w /io \
+            "${{ matrix.image }}" \
+            bash -c '
+              set -e
+              # the manylinux images keep their python under
+              # /opt/python/cp39-cp39/bin, off PATH
+              export PATH=/opt/python/cp39-cp39/bin:$PATH
+              export ETASSIA_MUSL=${{ matrix.musl == true && '1' || '0' }}
+              bash scripts/vendor_engine.sh
+              pip install -U pip wheel pytest
+              pip wheel . --no-deps -w dist
+              python3 -m wheel tags --remove --python-tag py3 --abi-tag none \
+                --platform-tag "${{ matrix.platform_tag }}" dist/*.whl
+              pip install dist/*.whl
+              ETASSIA_CORPUS_DIR=/io/etassia-rs/golden \
+                python3 -m pytest tests -q
+            '
+      - uses: actions/upload-artifact@v4
+        with:
+          name: wheels-${{ matrix.dist }}
+          path: dist/*.whl

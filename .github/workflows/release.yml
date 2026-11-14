@@ -1,0 +1,95 @@
+name: Publish to PyPI
+
+# Trusted publishing (OIDC): requires the owner-side pending-publisher
+# registration on pypi.org — project name `etassia`, owner `etassia`,
+# repository `etassia-py`, workflow `release.yml`. No API token.
+#
+# Wheels only: the sdist would carry no engine (the Rust sources are a
+# submodule of this repo, not of the archive, so a source install could
+# never load libetassia_ffi). Each platform wheel VENDORS the cdylib
+# built from the pinned etassia-rs commit; wheels.yml stages it and tags
+# the wheel with its real platform.
+#
+# The audit job is the honesty leg: it installs the PUBLISHED release from
+# PyPI (not the local tree) on every platform and replays the golden
+# corpus through it. A wheel that loses its vendored binary, or drifts
+# from the corpus, fails here instead of in a consumer's bundle.
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  wheels:
+    uses: ./.github/workflows/wheels.yml
+
+  publish:
+    needs: wheels
+    runs-on: ubuntu-latest
+    environment: pypi
+    permissions:
+      id-token: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: wheels-*
+          path: dist
+          merge-multiple: true
+      - uses: pypa/gh-action-pypi-publish@release/v1
+
+  audit:
+    needs: publish
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-22.04, macos-15, windows-2022]
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install the PUBLISHED release from PyPI
+        shell: bash
+        # The CDN can lag the upload by a few seconds; retry, do not fail
+        # on the first 404. The install pins this commit's exact version so
+        # a stale CDN edge cannot silently serve an older release.
+        run: |
+          want=$(python3 -c 'import pathlib, re; print(re.search(r"^version = \"([^\"]+)\"", pathlib.Path("pyproject.toml").read_text(), re.M).group(1))')
+          for attempt in $(seq 1 12); do
+            python3 -m pip install --upgrade --no-cache-dir "etassia==$want" pytest && break
+            echo "attempt $attempt: etassia==$want not visible yet; retrying"
+            sleep 15
+          done
+      - name: The installed version is this commit's version
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          import importlib.metadata as m
+          import pathlib
+          import re
+          want = re.search(
+              r'^version = "([^"]+)"',
+              pathlib.Path("pyproject.toml").read_text(),
+              re.M,
+          ).group(1)
+          got = m.version("etassia")
+          assert got == want, f"PyPI served {got}, this commit is {want}"
+          import etassia
+          assert etassia.__version__ == want, (
+              f"etassia.__version__ is {etassia.__version__}, expected {want}"
+          )
+          assert etassia.engine_commit() == (
+              pathlib.Path("src/etassia/etassia-rs-version.txt").read_text().strip()
+          ), "engine_commit drifted from etassia-rs-version.txt"
+          print("audited etassia", got, "engine", etassia.engine_commit())
+          PY
+      - name: Replay the golden corpus through the published wheel
+        shell: bash
+        env:
+          ETASSIA_CORPUS_DIR: ${{ github.workspace }}/etassia-rs/golden
+        run: python3 -m pytest tests -q
