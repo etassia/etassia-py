@@ -19,28 +19,30 @@ set -eu
 cd "$(dirname "$0")/.."
 
 echo "vendor_engine: uname -m=$(uname -m)"
-if ! command -v cargo >/dev/null 2>&1; then
-  case "$(uname -m)" in
-    armv7l | armv8l)
-      # the armv7-musl rust std cannot produce cdylibs at all ("does
-      # not support these crate types" - and the rustup install script
-      # 404s on the triple anyway). Alpine's own rust package ships a
-      # dylib-capable rustc for armv7; edge carries one new enough for
-      # the engine's MSRV. No rustup anywhere in this container.
-      apk add -q rust cargo \
-        --repository http://dl-cdn.alpinelinux.org/alpine/edge/main \
-        --allow-untrusted
-      ;;
-    *)
-      curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal
-      ;;
-  esac
-  export PATH="$HOME/.cargo/bin:/usr/bin:$PATH"
-fi
+case "$(uname -m)" in
+  armv7l | armv8l)
+    # the musllinux armv7 image ships a rust whose std cannot serve
+    # armv7-unknown-linux-musleabihf (E0463 at compile time), so the
+    # image's rust is replaced wholesale by Alpine edge's, which is
+    # dylib-capable and new enough for the engine's MSRV. No rustup
+    # anywhere in this container.
+    apk add -q rust cargo \
+      --repository http://dl-cdn.alpinelinux.org/alpine/edge/main \
+      --allow-untrusted
+    ;;
+  *)
+    if ! command -v cargo >/dev/null 2>&1; then
+      curl --proto '=https' --tlsv1.2 --retry 5 --retry-all-errors --connect-timeout 30 \
+        -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal
+      export PATH="$HOME/.cargo/bin:/usr/bin:$PATH"
+    fi
+    ;;
+esac
 
 commit="$(cat src/etassia/etassia-rs-version.txt)"
 mkdir -p tmp/engine
-curl -sL "https://codeload.github.com/etassia/etassia-rs/tar.gz/${commit}" \
+curl --proto '=https' --retry 5 --retry-all-errors --connect-timeout 30 -sL \
+  "https://codeload.github.com/etassia/etassia-rs/tar.gz/${commit}" \
   | tar xz --strip-components=1 -C tmp/engine
 
 mkdir -p src/etassia/lib
