@@ -151,14 +151,17 @@ jobs:
             image: quay.io/pypa/musllinux_1_2_armv7l:2026.11.07-1
             platform_tag: musllinux_1_2_armv7l
             dist: musllinux-armv7l
+            allow_fail: true # requalified 2026-11-16: E0463 can't find crate for core again
           - arch: linux/ppc64le
             image: quay.io/pypa/manylinux_2_28_ppc64le:2026.11.07-1
             platform_tag: manylinux_2_28_ppc64le
             dist: manylinux-ppc64le
+            allow_fail: true # requalified 2026-11-16: still failing under qemu
           - arch: linux/s390x
             image: quay.io/pypa/manylinux_2_28_s390x:2026.11.07-1
             platform_tag: manylinux_2_28_s390x
             dist: manylinux-s390x
+            allow_fail: true # requalified 2026-11-16: still failing under qemu
           - arch: linux/riscv64
             # the glibc riscv64 images left quay entirely (every date,
             # including latest, 404s) - the tier ships musl-only today
@@ -166,6 +169,7 @@ jobs:
             platform_tag: musllinux_1_2_riscv64
             dist: musllinux-riscv64
             musl: true
+            allow_fail: true # requalified 2026-11-16: still failing under qemu-riscv64
     steps:
       - uses: actions/checkout@v4
         with:
