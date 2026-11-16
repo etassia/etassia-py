@@ -147,6 +147,7 @@ jobs:
             # (native, non-emulated) container - systemd-resolved stub
             # breakage, --dns 8.8.8.8 does not rescue it; rebuild these
             # three legs as runner-side cross builds instead
+            allow_fail: true # requalified 2026-11-16: runner DNS breakage persists
           - arch: linux/arm/v7
             image: quay.io/pypa/musllinux_1_2_armv7l:2026.11.07-1
             platform_tag: musllinux_1_2_armv7l
