@@ -14,6 +14,7 @@ from ._ffi import (
     engine_commit,
     load,
     render,
+    render_dim,
 )
 
 try:

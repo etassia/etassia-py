@@ -95,6 +95,15 @@ def _bind(lib: ctypes.CDLL) -> None:
     lib.etassia_render.restype = EtassiaBuf
     lib.etassia_detect.argtypes = [ctypes.c_char_p, ctypes.c_size_t]
     lib.etassia_detect.restype = EtassiaBuf
+    # DIM arrives with the same two-arg contract (etassia_render_dim in
+    # crates/etassia-ffi); engines older than the DIM release do not
+    # carry the symbol, and the library still loads — render_dim raises
+    # the clear error at call time instead.
+    try:
+        lib.etassia_render_dim.argtypes = [ctypes.c_char_p, ctypes.c_size_t]
+        lib.etassia_render_dim.restype = EtassiaBuf
+    except AttributeError:
+        pass
     # etassia_free takes the EtassiaBuf BY VALUE and frees the buffer at most once.
     lib.etassia_free.argtypes = [EtassiaBuf]
     lib.etassia_free.restype = None
@@ -119,6 +128,31 @@ def _load_library(library_path: str | Path | None = None) -> ctypes.CDLL:
         )
     _bind(lib)
     return lib
+
+
+def render_dim(
+    document: str,
+    *,
+    library_path: str | Path | None = None,
+    native_context: NativeContext | None = None,
+) -> str:
+    """Render a DIM 0.1 document to SVG; DIM has no fallback tier, so every
+    failure raises RenderError (class "Unsupported" for a foreign DIM
+    version). Engines without the export raise EtassiaError.
+    """
+    if not isinstance(document, str):
+        raise TypeError("document must be a str")
+    lib = _resolve_library(library_path, native_context)
+    payload = document.encode("utf-8")
+    worker = getattr(lib, "etassia_render_dim", None)
+    if worker is None:
+        raise EtassiaError(
+            "the engine carries no etassia_render_dim export; it predates the DIM release"
+        )
+    status, data = _exchange(worker(payload, len(payload)), lib)
+    if status != 0:
+        _raise_for_wire(data)
+    return data.decode("utf-8")
 
 
 class NativeContext:
